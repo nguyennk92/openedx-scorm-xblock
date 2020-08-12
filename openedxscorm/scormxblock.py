@@ -4,7 +4,10 @@ import os
 import logging
 import re
 import xml.etree.ElementTree as ET
+import sys
 import zipfile
+import tempfile
+import mimetypes
 
 from django.core.files import File
 from django.core.files.storage import default_storage
@@ -23,7 +26,6 @@ def _(text):
 
 
 logger = logging.getLogger(__name__)
-
 
 @XBlock.wants("settings")
 class ScormXBlock(XBlock):
@@ -115,6 +117,7 @@ class ScormXBlock(XBlock):
         return self.student_view(context=context)
 
     def student_view(self, context=None):
+        logger.info("student_view index_page_url %s", self.index_page_url)
         student_context = {
             "index_page_url": self.index_page_url,
             "completion_status": self.get_completion_status(),
@@ -187,17 +190,30 @@ class ScormXBlock(XBlock):
             )
             recursive_delete(self.extract_folder_base_path)
         with zipfile.ZipFile(package_file, "r") as scorm_zipfile:
+            tmp_dir = tempfile.mkdtemp()
             for zipinfo in scorm_zipfile.infolist():
                 # Do not unzip folders, only files. In Python 3.6 we will have access to
                 # the is_dir() method to verify whether a ZipInfo object points to a
                 # directory.
                 # https://docs.python.org/3.6/library/zipfile.html#zipfile.ZipInfo.is_dir
                 if not zipinfo.filename.endswith("/"):
+                    # Manually extract the file to avoid UnsupportedOperation seek
+                    tmp_file = scorm_zipfile.extract(zipinfo, tmp_dir)
+                    logger.info("Extracting SCORM file %s",zipinfo.filename)
+
+                    # This is an extremely hacky solution. 
+                    # The problem is mimetypes.guess_type('*.js') 
+                    # eventually return type as bytes instead of str (i.e b'text/javascript' instead)
+                    # Why I said eventually because at first start-up, everything is fine. But after
+                    # using studio for uploading other files (video transcript for example), the problem
+                    # appears
+                
+                    mimetypes.add_types('text/javascript', '.js')
                     default_storage.save(
                         os.path.join(self.extract_folder_path, zipinfo.filename),
-                        scorm_zipfile.open(zipinfo.filename),
+                        open(tmp_file, "rb")
                     )
-
+                    os.remove(tmp_file)
         try:
             self.update_package_fields()
         except ScormError as e:
@@ -208,6 +224,7 @@ class ScormXBlock(XBlock):
     @property
     def index_page_url(self):
         if not self.package_meta or not self.index_page_path:
+            logger.info("index_page_url index_page_url is blank")
             return ""
         folder = self.extract_folder_path
         if default_storage.exists(
@@ -217,7 +234,9 @@ class ScormXBlock(XBlock):
             # is stored in the base folder.
             folder = self.extract_folder_base_path
             logger.warning("Serving SCORM content from old-style path: %s", folder)
-        return default_storage.url(os.path.join(folder, self.index_page_path))
+        result = default_storage.url(os.path.join(folder, self.index_page_path))
+        logger.info("index_page_url index_page_url = %s", result)
+        return result
 
     @property
     def package_path(self):
